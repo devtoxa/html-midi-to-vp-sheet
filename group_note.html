@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MIDI to Virtual Piano Converter</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 640px;
+            margin: 40px auto;
+            padding: 20px;
+            color: #333;
+            background-color: #f9f9f9;
+        }
+        .card {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 24px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+        }
+        h1 {
+            font-size: 1.25rem;
+            margin-top: 0;
+            margin-bottom: 20px;
+            color: #111827;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+        }
+        input[type="file"] {
+            display: block;
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            background: #fff;
+            font-size: 0.9rem;
+        }
+        textarea {
+            width: 100%;
+            height: 280px;
+            padding: 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.95rem;
+            line-height: 1.5;
+            letter-spacing: 0px;
+            white-space: pre-wrap;
+            word-break: break-all;
+            overflow-x: auto;
+            resize: vertical;
+            background-color: #f9fafb;
+        }
+        .btn-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        button {
+            padding: 8px 16px;
+            background-color: #2563eb;
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            font-weight: 500;
+            font-size: 0.9rem;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #1d4ed8;
+        }
+        .status {
+            font-size: 0.85rem;
+            color: #6b7280;
+            margin-top: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>MIDI to Virtual Piano 변환기</h1>
+        
+        <div class="form-group">
+            <label for="midiFile">MIDI 파일 선택 (.mid, .midi)</label>
+            <input type="file" id="midiFile" accept=".mid,.midi">
+            <div id="status" class="status">파일을 선택하면 자동으로 변환됩니다.</div>
+        </div>
+
+        <div class="form-group">
+            <label for="output">변환 결과 (QWERTY 악보)</label>
+            <textarea id="output" readonly placeholder="변환된 악보가 여기에 표시됩니다."></textarea>
+            <div class="btn-group">
+                <button id="copyBtn" type="button">복사하기</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Virtual Piano 표준 매핑 딕셔너리 (C2 = '1' ~ C7 = 'm')
+        const KEYMAP = {
+            36: '1', 37: '!', 38: '2', 39: '@', 40: '3', 41: '4', 42: '$',
+            43: '5', 44: '%', 45: '6', 46: '^', 47: '7', 48: '8', 49: '*',
+            50: '9', 51: '(', 52: '0', 53: 'q', 54: 'Q', 55: 'w', 56: 'W',
+            57: 'e', 58: 'E', 59: 'r', 60: 't', 61: 'T', 62: 'y', 63: 'Y',
+            64: 'u', 65: 'i', 66: 'I', 67: 'o', 68: 'O', 69: 'p', 70: 'P',
+            71: 'a', 72: 's', 73: 'S', 74: 'd', 75: 'D', 76: 'f', 77: 'g',
+            78: 'G', 79: 'h', 80: 'H', 81: 'j', 82: 'J', 83: 'k', 84: 'l',
+            85: 'L', 86: 'z', 87: 'Z', 88: 'x', 89: 'c', 90: 'C', 91: 'v',
+            92: 'V', 93: 'b', 94: 'B', 95: 'n', 96: 'm'
+        };
+
+        // 브라우저용 바이너리 MIDI 파일 파서 (mido.merge_tracks 동작 재현)
+        function parseMidiEvents(arrayBuffer) {
+            const data = new DataView(arrayBuffer);
+            let offset = 0;
+
+            function readString(len) {
+                let str = "";
+                for (let i = 0; i < len; i++) {
+                    str += String.fromCharCode(data.getUint8(offset++));
+                }
+                return str;
+            }
+
+            function readUint32() {
+                const val = data.getUint32(offset);
+                offset += 4;
+                return val;
+            }
+
+            function readUint16() {
+                const val = data.getUint16(offset);
+                offset += 2;
+                return val;
+            }
+
+            function readVarLen() {
+                let val = 0;
+                let b;
+                do {
+                    if (offset >= data.byteLength) break;
+                    b = data.getUint8(offset++);
+                    val = (val << 7) | (b & 0x7f);
+                } while (b & 0x80);
+                return val;
+            }
+
+            if (data.byteLength < 14) {
+                throw new Error("유효하지 않은 MIDI 파일입니다.");
+            }
+
+            const headerChunk = readString(4);
+            if (headerChunk !== "MThd") {
+                throw new Error("MIDI 파일 헤더(MThd)를 찾을 수 없습니다.");
+            }
+
+            const headerLength = readUint32();
+            const format = readUint16();
+            const numTracks = readUint16();
+            const timeDivision = readUint16();
+
+            if (headerLength > 6) {
+                offset += (headerLength - 6);
+            }
+
+            const allEvents = [];
+
+            // 모든 트랙의 메시지를 추출하여 절대 tick 계산
+            for (let t = 0; t < numTracks; t++) {
+                if (offset >= data.byteLength) break;
+                const trackChunk = readString(4);
+                if (trackChunk !== "MTrk") break;
+
+                const trackLength = readUint32();
+                const trackEnd = offset + trackLength;
+
+                let currentTick = 0;
+                let runningStatus = 0;
+
+                while (offset < trackEnd && offset < data.byteLength) {
+                    const deltaTime = readVarLen();
+                    currentTick += deltaTime;
+
+                    let status = data.getUint8(offset);
+                    if (status >= 0x80) {
+                        offset++;
+                        runningStatus = status;
+                    } else {
+                        status = runningStatus;
+                    }
+
+                    if (!status) break;
+
+                    const command = status & 0xf0;
+
+                    if (status === 0xff) { // Meta Event
+                        const metaType = data.getUint8(offset++);
+                        const len = readVarLen();
+                        if (metaType === 0x51 && len === 3) { // Tempo Event
+                            const tempo = (data.getUint8(offset) << 16) | (data.getUint8(offset + 1) << 8) | data.getUint8(offset + 2);
+                            allEvents.push({ tick: currentTick, type: 'tempo', tempo });
+                            offset += 3;
+                        } else {
+                            offset += len;
+                            allEvents.push({ tick: currentTick, type: 'meta' });
+                        }
+                    } else if (status === 0xf0 || status === 0xf7) { // SysEx Event
+                        const len = readVarLen();
+                        offset += len;
+                        allEvents.push({ tick: currentTick, type: 'sysex' });
+                    } else if (command === 0x80) { // Note Off
+                        const note = data.getUint8(offset++);
+                        const velocity = data.getUint8(offset++);
+                        allEvents.push({ tick: currentTick, type: 'note_off', note, velocity });
+                    } else if (command === 0x90) { // Note On
+                        const note = data.getUint8(offset++);
+                        const velocity = data.getUint8(offset++);
+                        allEvents.push({ tick: currentTick, type: 'note_on', note, velocity });
+                    } else if (command === 0xa0 || command === 0xb0 || command === 0xe0) {
+                        offset += 2;
+                        allEvents.push({ tick: currentTick, type: 'other' });
+                    } else if (command === 0xc0 || command === 0xd0) {
+                        offset += 1;
+                        allEvents.push({ tick: currentTick, type: 'other' });
+                    } else {
+                        break;
+                    }
+                }
+                offset = Math.min(trackEnd, data.byteLength);
+            }
+
+            // 모든 트랙의 이벤트를 tick 순서대로 정렬 (merge_tracks)
+            // identical tick일 경우 tempo 이벤트를 노트보다 우선 처리
+            allEvents.sort((a, b) => {
+                if (a.tick !== b.tick) return a.tick - b.tick;
+                if (a.type === 'tempo' && b.type !== 'tempo') return -1;
+                if (a.type !== 'tempo' && b.type === 'tempo') return 1;
+                return 0;
+            });
+
+            // tick -> millisecond (ms) 절대 시간 계산
+            let currentMs = 0;
+            let lastTick = 0;
+            let currentTempo = 500000; // 기본 120 BPM (500,000 µs/beat)
+
+            const timedEvents = [];
+
+            for (const ev of allEvents) {
+                const deltaTick = ev.tick - lastTick;
+                if (deltaTick > 0) {
+                    const deltaMs = (deltaTick * currentTempo) / (timeDivision * 1000);
+                    currentMs += deltaMs;
+                    lastTick = ev.tick;
+                }
+
+                if (ev.type === 'tempo') {
+                    currentTempo = ev.tempo;
+                } else if (ev.type === 'note_on' && ev.velocity > 0) {
+                    timedEvents.push({
+                        ms: currentMs,
+                        note: ev.note
+                    });
+                }
+            }
+
+            return timedEvents;
+        }
+
+        function midiToQwerty(arrayBuffer) {
+            let timedEvents;
+            try {
+                timedEvents = parseMidiEvents(arrayBuffer);
+            } catch (e) {
+                return `오류 발생: ${e.message}`;
+            }
+
+            if (!timedEvents || timedEvents.length === 0) {
+                return "변환할 노트가 없습니다.";
+            }
+
+            // 1. 같은 타임스탬프(20ms 이내)의 노트들을 동시 노트 [ ]그룹으로 묶음
+            const groups = [];
+            let currentGroup = null;
+
+            for (const ev of timedEvents) {
+                const char = KEYMAP[ev.note] || '*';
+
+                if (!currentGroup) {
+                    currentGroup = { ms: ev.ms, notes: [char] };
+                } else if (Math.abs(ev.ms - currentGroup.ms) <= 20) {
+                    if (!currentGroup.notes.includes(char)) {
+                        currentGroup.notes.push(char);
+                    }
+                } else {
+                    groups.push(currentGroup);
+                    currentGroup = { ms: ev.ms, notes: [char] };
+                }
+            }
+            if (currentGroup) {
+                groups.push(currentGroup);
+            }
+
+            // 2. 실제 노트 타이밍(ms)을 누적 오차 없는 절대 그리드로 계산 (100ms당 1공백)
+            let output = "";
+            const MS_PER_SPACE = 100;   // 100ms당 공백 1개
+
+            let currentGrid = 0;
+
+            for (let i = 0; i < groups.length; i++) {
+                const grp = groups[i];
+                // 실제 노트 발생 시간을 100ms 그리드 위치로 반올림 변환
+                const targetGrid = Math.round(grp.ms / MS_PER_SPACE);
+                const spacesCount = targetGrid - currentGrid;
+
+                if (spacesCount > 0) {
+                    output += " ".repeat(spacesCount);
+                    currentGrid = targetGrid;
+                }
+
+                // 동시 노트는 [ ], 단일 노트는 그냥 출력
+                if (grp.notes.length > 1) {
+                    output += `[${grp.notes.join("")}]`;
+                } else {
+                    output += grp.notes[0];
+                }
+            }
+
+            return output.trim();
+        }
+
+        const midiFileInput = document.getElementById('midiFile');
+        const outputTextarea = document.getElementById('output');
+        const statusDiv = document.getElementById('status');
+        const copyBtn = document.getElementById('copyBtn');
+
+        midiFileInput.addEventListener('change', function (e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            statusDiv.textContent = `[${file.name}] 변환 중...`;
+
+            const reader = new FileReader();
+            reader.onload = function (evt) {
+                const arrayBuffer = evt.target.result;
+                const result = midiToQwerty(arrayBuffer);
+                outputTextarea.value = result;
+                statusDiv.textContent = `[${file.name}] 변환 완료`;
+            };
+            reader.onerror = function () {
+                outputTextarea.value = "오류: 파일을 읽을 수 없습니다.";
+                statusDiv.textContent = "오류 발생";
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        copyBtn.addEventListener('click', function () {
+            if (!outputTextarea.value) return;
+            outputTextarea.select();
+            document.execCommand('copy');
+            const originalText = copyBtn.textContent;
+            copyBtn.textContent = '복사되었습니다!';
+            setTimeout(() => {
+                copyBtn.textContent = originalText;
+            }, 1500);
+        });
+    </script>
+</body>
+</html>
